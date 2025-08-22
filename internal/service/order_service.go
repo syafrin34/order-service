@@ -6,8 +6,12 @@ import (
 	"net/http"
 	"order-service/internal/entity"
 	"order-service/internal/repository"
+	"os"
+
+	"github.com/rs/zerolog"
 )
 
+var logger = zerolog.New(os.Stdout).With().Timestamp().Logger()
 type OrderService struct {
 	orderRepo repository.OrderRepository
 	productServiceURL string
@@ -24,25 +28,28 @@ func NewOrderService(orderRepo repository.OrderRepository, productServiceURL, pr
 }
 
 func (o *OrderService)CreateOrder(order *entity.OrderEntity)(*entity.OrderEntity, error){
-	for _, productequest := range order.ProductRequests{
+	for _, productRequest := range order.ProductRequests{
 		// check product availability
-		available, err := o.checkProductStock(productequest.ProductID, productequest.Quantity)
+		available, err := o.checkProductStock(productRequest.ProductID, productRequest.Quantity)
 		 if err != nil {
+			logger.Error().Err(err).Msgf("Error checking product stock for product %d", productRequest.ProductID)
 			return nil, err
 		 }
 		// get pricing
-		pricing, err := o.GetPricing(productequest.ProductID)
+		pricing, err := o.GetPricing(productRequest.ProductID)
 		if err != nil {
+			logger.Error().Err(err).Msgf("Error getting pricing for product  %d", productRequest.ProductID)
 			return  nil, err
 		}
 
 		if !available {
+			logger.Warn().Msgf("product %d out of stock", productRequest.ProductID)
 			return  nil, fmt.Errorf("product out of stock")
 		}
 
-		productequest.FinalPrice = float64(productequest.Quantity)*pricing.FinalPrice
-		productequest.MarkUp = float64(productequest.Quantity)* pricing.Markup
-		productequest.Discount = float64(productequest.Quantity)* pricing.Discount
+		productRequest.FinalPrice = float64(productRequest.Quantity)*pricing.FinalPrice
+		productRequest.MarkUp = float64(productRequest.Quantity)* pricing.Markup
+		productRequest.Discount = float64(productRequest.Quantity)* pricing.Discount
 	}
 
 	// calculate order total 
@@ -53,6 +60,7 @@ func (o *OrderService)CreateOrder(order *entity.OrderEntity)(*entity.OrderEntity
 
 	createdOrder, err := o.orderRepo.CreateOrder(order)
 	if err != nil {
+		logger.Error().Err(err).Msgf("Error creating order")
 		return nil, err
 	}
 
@@ -61,6 +69,7 @@ func (o *OrderService)CreateOrder(order *entity.OrderEntity)(*entity.OrderEntity
 func (o *OrderService)UpdateOrder(order *entity.OrderEntity)(*entity.OrderEntity, error){
 	updateOrder, err := o.orderRepo.UpdateOrder(order)
 	if err != nil {
+		logger.Error().Err(err).Msgf("Error updating order")
 		return nil, err
 	}
 
@@ -69,12 +78,14 @@ func (o *OrderService)UpdateOrder(order *entity.OrderEntity)(*entity.OrderEntity
 func (o *OrderService)CancelOrder(id int)(*entity.OrderEntity, error){
 	order, err := o.orderRepo.GetOrderByID(id)
 	if err != nil {
+		logger.Error().Err(err).Msgf("Error getting order by ID %d", id)
 		return  nil, err
 	}
 	order.Status = "cancelled"
 
 	updateOrder, err := o.orderRepo.UpdateOrder(order)
 	if err != nil {
+		logger.Error().Err(err).Msgf("Error updating order")
 		return  nil, err
 	}
 
