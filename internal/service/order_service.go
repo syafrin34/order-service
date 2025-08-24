@@ -27,7 +27,8 @@ func NewOrderService(orderRepo repository.OrderRepository, productServiceURL, pr
 	}
 }
 
-func (o *OrderService)CreateOrder(order *entity.OrderEntity)(*entity.OrderEntity, error){
+func (o *OrderService)CreateOrder( order *entity.OrderEntity)(*entity.OrderEntity, error){
+	
 	availabilityCh := make(chan struct{
 		ProductID int
 		Available bool
@@ -75,7 +76,7 @@ func (o *OrderService)CreateOrder(order *entity.OrderEntity)(*entity.OrderEntity
 		go func(productRequest *entity.ProductRequest) {
 			available, err := o.checkProductStock(productRequest.ProductID, productRequest.Quantity)
 			availabilityCh <- struct{ProductID int; Available bool; Err error}{
-				ProductID: pricing.ProductID,
+				ProductID: productRequest.ProductID,
 				Available: available,
 				Err: err,
 			}
