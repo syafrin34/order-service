@@ -4,7 +4,7 @@ type OrderEntity struct {
 	ID int `json:"id"`
 	UserID int `json:"user_id"`
 	ProductRequests []ProductRequest `json:"product_requests"`
-	QuantityID int `json:"quantity"`
+	Quantity int `json:"quantity"`
 	Total float64 `json:"total"`
 	TotalMarkUp float64 `json:"total_mark_up"`
 	TotalDiscount float64 `json:"total_discount"`
@@ -18,3 +18,4 @@ type ProductRequest struct {
 	Discount float64 `json:"discount"`
 	FinalPrice float64 `json:"final_price"`
 }
+

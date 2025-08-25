@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"order-service/internal/api"
 	"order-service/internal/repository"
 	"order-service/internal/service"
@@ -12,8 +13,21 @@ import (
 	"golang.org/x/time/rate"
 )
 
+func connectDB()(*sql.DB, error){
+	db, err := sql.Open("mysql", "root:@tcp(127.0.0.1:3306)/orderdb")
+	if err != nil {
+		return nil, err
+	}
+	return db, nil
+}
+
 func main() {
-	orderRepo := repository.NewOrderRepository()
+	db, err := connectDB()
+	if err != nil {
+		panic(err)
+	}
+
+	orderRepo := repository.NewOrderRepository(db)
 	orderService := service.NewOrderService(*orderRepo, "http://localhost:8081", "http://localhost:8083")
 	orderHandler := api.NewOrderHandler(*orderService)
 	
