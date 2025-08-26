@@ -1,6 +1,8 @@
+// Package service
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,42 +11,44 @@ import (
 	"os"
 
 	"github.com/rs/zerolog"
+	"github.com/segmentio/kafka-go"
 )
 
 var logger = zerolog.New(os.Stdout).With().Timestamp().Logger()
+
 type OrderService struct {
-	orderRepo repository.OrderRepository
+	orderRepo         repository.OrderRepository
 	productServiceURL string
 	pricingServiceURL string
-
+	kafkaWriter       *kafka.Writer
 }
 
-func NewOrderService(orderRepo repository.OrderRepository, productServiceURL, pricingServiceURL string)*OrderService{
+func NewOrderService(orderRepo repository.OrderRepository, productServiceURL, pricingServiceURL string, kafkaWriter *kafka.Writer) *OrderService {
 	return &OrderService{
-		orderRepo: orderRepo,
+		orderRepo:         orderRepo,
 		productServiceURL: pricingServiceURL,
 		pricingServiceURL: pricingServiceURL,
+		kafkaWriter:       kafkaWriter,
 	}
 }
 
-func (o *OrderService)CreateOrder( order *entity.OrderEntity)(*entity.OrderEntity, error){
-	
-	availabilityCh := make(chan struct{
+func (o *OrderService) CreateOrder(ctx context.Context, order *entity.OrderEntity) (*entity.OrderEntity, error) {
+
+	availabilityCh := make(chan struct {
 		ProductID int
 		Available bool
-		Err error
+		Err       error
 	}, len(order.ProductRequests))
 
-	pricingCh := make(chan struct{
-		ProductID int
+	pricingCh := make(chan struct {
+		ProductID  int
 		FinalPrice float64
-		MarkUp float64
-		Discount float64
-		Err error
+		MarkUp     float64
+		Discount   float64
+		Err        error
 	}, len(order.ProductRequests))
 
-	
-	for _, productRequest := range order.ProductRequests{
+	for _, productRequest := range order.ProductRequests {
 
 		// 1. proses syncronus
 
@@ -70,69 +74,75 @@ func (o *OrderService)CreateOrder( order *entity.OrderEntity)(*entity.OrderEntit
 		// productRequest.MarkUp = float64(productRequest.Quantity)* pricing.Markup
 		// productRequest.Discount = float64(productRequest.Quantity)* pricing.Discount
 
-		
 		// 2. proses asyncronus
 		// go routine proses cek available stock product
 		go func(productRequest *entity.ProductRequest) {
-			available, err := o.checkProductStock(productRequest.ProductID, productRequest.Quantity)
-			availabilityCh <- struct{ProductID int; Available bool; Err error}{
+			available, err := o.checkProductStock(ctx, productRequest.ProductID, productRequest.Quantity)
+			availabilityCh <- struct {
+				ProductID int
+				Available bool
+				Err       error
+			}{
 				ProductID: productRequest.ProductID,
 				Available: available,
-				Err: err,
+				Err:       err,
 			}
 		}(&productRequest)
-		
+
 		// go routine untuk pricing
 
-		go func(productRequest *entity.ProductRequest){
-			pricing, err := o.GetPricing(productRequest.ProductID)
-			pricingCh <-  struct{ProductID int; FinalPrice float64; MarkUp float64; Discount float64; Err error}{
-				ProductID: pricing.ProductID,
+		go func(productRequest *entity.ProductRequest) {
+			pricing, err := o.GetPricing(ctx, productRequest.ProductID)
+			pricingCh <- struct {
+				ProductID  int
+				FinalPrice float64
+				MarkUp     float64
+				Discount   float64
+				Err        error
+			}{
+				ProductID:  pricing.ProductID,
 				FinalPrice: pricing.FinalPrice,
-				MarkUp: pricing.Markup,
-				Discount: pricing.Discount,
-				Err: err,
-
+				MarkUp:     pricing.Markup,
+				Discount:   pricing.Discount,
+				Err:        err,
 			}
 
 		}(&productRequest)
-
 
 	}
 
-	for range order.ProductRequests{
-		availabilityResult := <- availabilityCh
-		pricingResult  := <- pricingCh
+	for range order.ProductRequests {
+		availabilityResult := <-availabilityCh
+		pricingResult := <-pricingCh
 
 		if availabilityResult.Err != nil {
 			logger.Error().Err(availabilityResult.Err).Msgf("Error checking product stock for product %d", availabilityResult.ProductID)
-			return  nil, availabilityResult.Err
+			return nil, availabilityResult.Err
 		}
 
 		if !availabilityResult.Available {
 			logger.Warn().Msgf("product %d out of stock", availabilityResult.ProductID)
-			return  nil, fmt.Errorf("product out of stock")
+			return nil, fmt.Errorf("product out of stock")
 		}
 
 		if pricingResult.Err != nil {
 			logger.Error().Err(pricingResult.Err).Msgf("Error getting pricing for product  %d", pricingResult.ProductID)
-			return  nil, pricingResult.Err
+			return nil, pricingResult.Err
 		}
 
-		for _, productRequest := range order.ProductRequests{
-			if productRequest.ProductID == availabilityResult.ProductID{
-				productRequest.FinalPrice = float64(productRequest.Quantity)*pricingResult.FinalPrice
-				productRequest.MarkUp = float64(productRequest.Quantity)* pricingResult.MarkUp
-				productRequest.Discount = float64(productRequest.Quantity)* pricingResult.Discount 
+		for _, productRequest := range order.ProductRequests {
+			if productRequest.ProductID == availabilityResult.ProductID {
+				productRequest.FinalPrice = float64(productRequest.Quantity) * pricingResult.FinalPrice
+				productRequest.MarkUp = float64(productRequest.Quantity) * pricingResult.MarkUp
+				productRequest.Discount = float64(productRequest.Quantity) * pricingResult.Discount
 			}
-
 
 		}
 	}
 
-	// calculate order total 
+	// calculate order total
 	order.Total = 0
-	for _, productRequest := range order.ProductRequests{
+	for _, productRequest := range order.ProductRequests {
 		order.Total += productRequest.FinalPrice
 	}
 
@@ -142,35 +152,63 @@ func (o *OrderService)CreateOrder( order *entity.OrderEntity)(*entity.OrderEntit
 		return nil, err
 	}
 
-	return  createdOrder, nil
+	err = o.publishorderEvent(ctx, createdOrder, "created")
+	if err != nil {
+		return nil, err
+	}
+	return createdOrder, nil
 }
-func (o *OrderService)UpdateOrder(order *entity.OrderEntity)(*entity.OrderEntity, error){
+func (o *OrderService) UpdateOrder(ctx context.Context, order *entity.OrderEntity) (*entity.OrderEntity, error) {
+	if order.Status == "paid" {
+		// check product availability
+		for _, productRequest := range order.ProductRequests {
+			available, err := o.checkProductStock(ctx, productRequest.ProductID, productRequest.Quantity)
+			if err != nil {
+				logger.Error().Err(err).Msgf("error checking product stock for product %d", productRequest.ProductID)
+				return nil, err
+			}
+			if !available {
+				logger.Warn().Msgf("Product %d out of stock", productRequest.ProductID)
+				return nil, fmt.Errorf("product out of stock")
+			}
+		}
+
+	}
+
 	updateOrder, err := o.orderRepo.UpdateOrder(order)
 	if err != nil {
 		logger.Error().Err(err).Msgf("Error updating order")
 		return nil, err
 	}
 
-	return  updateOrder, nil
+	err = o.publishorderEvent(ctx, updateOrder, "updated")
+	if err != nil {
+		return nil, err
+	}
+
+	return updateOrder, nil
 }
-func (o *OrderService)CancelOrder(id int)(*entity.OrderEntity, error){
+func (o *OrderService) CancelOrder(ctx context.Context, id int) (*entity.OrderEntity, error) {
 	order, err := o.orderRepo.GetOrderByID(id)
 	if err != nil {
 		logger.Error().Err(err).Msgf("Error getting order by ID %d", id)
-		return  nil, err
+		return nil, err
 	}
 	order.Status = "cancelled"
 
 	updateOrder, err := o.orderRepo.UpdateOrder(order)
 	if err != nil {
 		logger.Error().Err(err).Msgf("Error updating order")
-		return  nil, err
+		return nil, err
 	}
-
-	return  updateOrder, nil
+	err = o.publishorderEvent(ctx, updateOrder, "cancelled")
+	if err != nil {
+		return nil, err
+	}
+	return updateOrder, nil
 }
 
-func(o *OrderService)checkProductStock(productID int, quantity int)(bool, error){
+func (o *OrderService) checkProductStock(ctx context.Context, productID int, quantity int) (bool, error) {
 	resp, err := http.Get(fmt.Sprintf("%s/product/%d/stock", o.pricingServiceURL, productID))
 	if err != nil {
 		return false, err
@@ -183,28 +221,43 @@ func(o *OrderService)checkProductStock(productID int, quantity int)(bool, error)
 
 	var stockData map[string]int
 	if err := json.NewDecoder(resp.Body).Decode(&stockData); err != nil {
-		return  false, err
+		return false, err
 	}
 
 	availableStock := stockData["stock"]
-	return  availableStock >= quantity,nil
+	return availableStock >= quantity, nil
 
 }
 
-func(o *OrderService)GetPricing(productID int)(*entity.Pricing, error){
+func (o *OrderService) GetPricing(ctx context.Context, productID int) (*entity.Pricing, error) {
 	resp, err := http.Get(fmt.Sprintf("%s/products/%d/pricing", o.pricingServiceURL, productID))
 	if err != nil {
-		return  nil, err
+		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK{
+	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("failed to get pricing")
 	}
 	var pricing entity.Pricing
-	if err := json.NewDecoder(resp.Body).Decode(&pricing);err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&pricing); err != nil {
 		return nil, err
 	}
 	return &pricing, nil
 }
 
+func (o *OrderService) publishorderEvent(ctx context.Context, order *entity.OrderEntity, key string) error {
+	orderJSON, err := json.Marshal(order)
+	if err != nil {
+		return err
+	}
 
+	msg := kafka.Message{
+		Key:   []byte(fmt.Sprintf("order-%s-%d", key, order.ID)),
+		Value: orderJSON,
+	}
+	err = o.kafkaWriter.WriteMessages(ctx, msg)
+	if err != nil {
+		return err
+	}
+	return nil
+}

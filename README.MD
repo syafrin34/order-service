@@ -4,6 +4,7 @@
 // go get github.com/golang-jwt/jwt/v5
 // go get github.com/go-redis/redis/v8
 // go get github.com/go-sql-driver/mysql
+// go get github.com/segmentio/kafka-go
 
 or create a new repository on the command line
 echo "# order-service" >> README.md

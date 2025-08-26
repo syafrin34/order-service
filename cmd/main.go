@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"order-service/internal/api"
+	"order-service/internal/config"
 	"order-service/internal/repository"
 	"order-service/internal/service"
 	"order-service/internal/sharding"
@@ -41,10 +42,11 @@ func main() {
 		panic(err)
 	}
 
+	kafkaWriter := config.NewKafkaWrite("order-topic")
 	router := sharding.NewShardRouter(3)
 
 	orderRepo := repository.NewOrderRepository([]*sql.DB{db1, db2, db3}, router)
-	orderService := service.NewOrderService(*orderRepo, "http://localhost:8081", "http://localhost:8083")
+	orderService := service.NewOrderService(*orderRepo, "http://localhost:8081", "http://localhost:8083", kafkaWriter)
 	orderHandler := api.NewOrderHandler(*orderService)
 
 	e := echo.New()

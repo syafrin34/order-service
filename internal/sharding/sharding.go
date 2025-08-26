@@ -1,3 +1,4 @@
+// Package sharding
 package sharding
 
 type ShardRouter struct {
@@ -11,6 +12,7 @@ func NewShardRouter(shardCount int) *ShardRouter {
 }
 
 func (r *ShardRouter) GetShard(id int) int {
+	// Hash the ID and get the shard index
 	shardIndex := id % r.ShardCount
 	return shardIndex
 }
