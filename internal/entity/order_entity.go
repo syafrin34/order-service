@@ -11,6 +11,7 @@ type OrderEntity struct {
 	TotalMarkUp     float64          `json:"total_mark_up"`
 	TotalDiscount   float64          `json:"total_discount"`
 	Status          string           `json:"status"`
+	IdempotentKey   string           `json:"idempotent_key"`
 }
 
 type ProductRequest struct {

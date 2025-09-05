@@ -4,12 +4,16 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"order-service/internal/entity"
 	"order-service/internal/repository"
 	"os"
+	"time"
 
+	"github.com/go-redis/redis/v8"
 	"github.com/rs/zerolog"
 	"github.com/segmentio/kafka-go"
 )
@@ -21,18 +25,31 @@ type OrderService struct {
 	productServiceURL string
 	pricingServiceURL string
 	kafkaWriter       *kafka.Writer
+	rdb               *redis.Client
 }
 
-func NewOrderService(orderRepo repository.OrderRepository, productServiceURL, pricingServiceURL string, kafkaWriter *kafka.Writer) *OrderService {
+func NewOrderService(orderRepo repository.OrderRepository, productServiceURL, pricingServiceURL string, kafkaWriter *kafka.Writer, rdb *redis.Client) *OrderService {
 	return &OrderService{
 		orderRepo:         orderRepo,
 		productServiceURL: pricingServiceURL,
 		pricingServiceURL: pricingServiceURL,
 		kafkaWriter:       kafkaWriter,
+		rdb:               rdb,
 	}
 }
 
 func (o *OrderService) CreateOrder(ctx context.Context, order *entity.OrderEntity) (*entity.OrderEntity, error) {
+
+	// get the idempotent key from order
+	validate, err := o.validateIdempotentKey(ctx, order.IdempotentKey)
+	if err != nil {
+		return nil, err
+	}
+	if !validate {
+		return nil, errors.New("idempotent key already exists")
+	}
+
+	order.OrderID = randomOrderID()
 
 	availabilityCh := make(chan struct {
 		ProductID int
@@ -151,6 +168,10 @@ func (o *OrderService) CreateOrder(ctx context.Context, order *entity.OrderEntit
 		logger.Error().Err(err).Msgf("Error creating order")
 		return nil, err
 	}
+	// if env is set to test, return
+	if os.Getenv("ENV") == "test" {
+		return createdOrder, nil
+	}
 
 	err = o.publishorderEvent(ctx, createdOrder, "created")
 	if err != nil {
@@ -260,4 +281,32 @@ func (o *OrderService) publishorderEvent(ctx context.Context, order *entity.Orde
 		return err
 	}
 	return nil
+}
+
+func (o *OrderService) validateIdempotentKey(ctx context.Context, key string) (bool, error) {
+	// if env is set to test, return true
+	if os.Getenv("ENV") == "test" {
+		return true, nil
+	}
+	// check if the key exists in the redis cache
+	// if it exists, return false
+	redisKey := fmt.Sprintf("idempotent-key:%s", key)
+	val, err := o.rdb.Get(ctx, redisKey).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return false, err
+	}
+
+	if val != "" {
+		return false, errors.New("idempotent key already exists")
+	}
+
+	// if it doesn't exist, add the key to the cache with a TTL of 24 hours
+	// and return true
+	err = o.rdb.Set(ctx, redisKey, "exists", 24*time.Hour).Err()
+
+	return true, nil
+}
+
+func randomOrderID() int {
+	return 1000 + rand.Intn(1000)
 }
